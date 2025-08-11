@@ -1,19 +1,17 @@
 # app.py
+import os
 import requests
 from flask import Flask, render_template, request, jsonify
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
 
+# --- Konfigurace ---
 # Inicializace Flask aplikace
 app = Flask(__name__)
 
+# API klíč pro Serper.dev
+SERPER_API_KEY = 'caf2c44fe2d73d78070f15b24d8c9e3513c51414' 
+SERPER_API_URL = "https://google.serper.dev/search"
+
+# --- Routy aplikace ---
 @app.route('/')
 def index():
     """Zobrazí hlavní HTML stránku."""
@@ -22,80 +20,49 @@ def index():
 @app.route('/api/search')
 def search_api():
     """
-    API endpoint, který použije Selenium k načtení stránky a vrátí výsledky.
+    API endpoint, který zavolá Serper API a vrátí strukturované výsledky.
+    Nahrazuje původní komplexní Selenium logiku.
     """
+    # 1. Získání vyhledávacího dotazu z URL (např. /api/search?q=dotaz)
     query = request.args.get('q', '')
     if not query:
         return jsonify({"error": "Chybí vyhledávací dotaz 'q'."}), 400
     
-    search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}&hl=cs"
+    # 2. Příprava dat pro odeslání na Serper API
+    payload = {
+        "q": query,
+        "gl": "cz",
+        "hl": "cs" 
+    }
+    headers = {
+        'X-API-KEY': SERPER_API_KEY,
+        'Content-Type': 'application/json'
+    }
 
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chrome_options.add_experimental_option('useAutomationExtension', False)
-
-    driver = None
+    # 3. Odeslání požadavku na API a zpracování odpovědi
     try:
-        service = ChromeService(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        
-        driver.get(search_url)
+        response = requests.post(SERPER_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
 
-        # Zpracování cookie souhlasu
-        try:
-            consent_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Přijmout vše')] | //button[contains(., 'Accept all')]"))
-            )
-            consent_button.click()
-            time.sleep(0.5)
-        except Exception:
-            print("Cookie consent button not found or not needed, continuing.")
-            pass
-
-        # Čekání na načtení výsledků (hledáme alespoň jeden prvek, který nás zajímá)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "a.zReHs h3.LC20lb.MBeuO.DKV0Md"))
-        )
+        api_data = response.json()
         
-        html_content = driver.page_source
+        # 4. Zpracování výsledků do požadovaného formátu
+        results = []
+        for item in api_data.get('organic', []):
+            results.append({
+                'title': item.get('title'),
+                'url': item.get('link') 
+            })
         
-        data = parse_google_results(html_content)
-        return jsonify(data)
+        return jsonify(results)
 
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Došlo k chybě při komunikaci s API: {e}"}), 500
     except Exception as e:
-        return jsonify({"error": f"Došlo k chybě při běhu Selenium: {e}"}), 500
-    finally:
-        if driver:
-            driver.quit()
+        return jsonify({"error": f"Nastala neočekávaná chyba: {e}"}), 500
 
-def parse_google_results(html_content: str) -> list[dict]:
-    """
-    Zpracuje stažený HTML kód ze stránky Google a extrahuje přirozené výsledky.
-    Tato verze je upravena tak, aby hledala <a> s třídou 'zReHs' a v něm <h3> s přesnými třídami.
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    results = []
-    seen_urls = set()
-
-    # Cílíme na <a> tagy, které mají třídu 'zReHs'.
-    for link_tag in soup.find_all('a', class_='zReHs'):
-        # Uvnitř tohoto odkazu hledáme H3 se specifickými třídami.
-        h3_tag = link_tag.select_one('h3.LC20lb.MBeuO.DKV0Md')
-        
-        if h3_tag:
-            url = link_tag.get('href')
-            title = h3_tag.get_text(strip=True)
-            
-            # Kontrola platnosti a duplicity
-            if url and url.startswith('http') and url not in seen_urls:
-                results.append({'title': title, 'url': url})
-                seen_urls.add(url)
-
-    return results
-
+# --- Spuštění aplikace ---
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Použijte port z proměnné prostředí, což je best practice pro hosting
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=True, host='0.0.0.0', port=port)
