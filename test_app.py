@@ -1,70 +1,80 @@
 # test_app.py
 import unittest
-from app import parse_google_results
+import json
+from unittest.mock import patch, MagicMock
+import requests
 
-# Ukázkové HTML, které přesně simuluje strukturu ze screenshotu.
-FAKE_GOOGLE_HTML = """
-<html><body>
-    <!-- Validní výsledek 1 -->
-    <a class="zReHs" href="https://www.example.com/prvni-vysledek">
-        <h3 class="LC20lb MBeuO DKV0Md">Toto je první titulek</h3>
-    </a>
+# Importujeme 'app' z tvého souboru app.py
+from app import app
+
+class AppTestCase(unittest.TestCase):
     
-    <!-- Validní výsledek 2 -->
-    <a class="zReHs" href="http://www.example.org/druhy-vysledek">
-        <h3 class="LC20lb MBeuO DKV0Md">Toto je druhý titulek</h3>
-    </a>
+    def setUp(self):
+        """Tato metoda se spustí před každým testem."""
+        app.config['TESTING'] = True
+        self.client = app.test_client()
 
-    <!-- Nevalidní: špatná třída u H3 -->
-    <a class="zReHs" href="http://www.example.com/spatne-h3">
-        <h3 class="jina-trida">Špatný titulek</h3>
-    </a>
+    @patch('app.requests.post') # Nahradíme 'requests.post' v modulu 'app' naším dvojníkem
+    def test_search_success(self, mock_post):
+        """Testuje úspěšné vyhledávání."""
+        # 1. Připravíme si falešnou odpověď od API
+        fake_api_response = {
+            "organic": [
+                {
+                    "title": "Test Title 1",
+                    "link": "http://example.com/1",
+                    "snippet": "Description 1"
+                },
+                {
+                    "title": "Test Title 2",
+                    "link": "http://example.com/2",
+                    "snippet": "Description 2"
+                }
+            ]
+        }
+        
+        # 2. Nastavíme našeho "dvojníka" (mock), aby vrátil tuto odpověď
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = fake_api_response
+        mock_response.raise_for_status.return_value = None 
+        mock_post.return_value = mock_response
 
-    <!-- Nevalidní: špatná třída u A -->
-    <a class="jina-trida" href="http://www.example.com/spatne-a">
-        <h3 class="LC20lb MBeuO DKV0Md">Další špatný titulek</h3>
-    </a>
+        # 3. Zavoláme náš endpoint
+        response = self.client.get('/api/search?q=testovaci dotaz')
+        
+        # 4. Ověříme výsledky
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data)
+        
+        # Zkontrolujeme, zda výstup odpovídá našemu očekávanému formátu
+        expected_data = [
+            {'title': 'Test Title 1', 'url': 'http://example.com/1'},
+            {'title': 'Test Title 2', 'url': 'http://example.com/2'}
+        ]
+        self.assertEqual(data, expected_data)
 
-    <!-- Duplicitní URL -->
-    <a class="zReHs" href="https://www.example.com/prvni-vysledek">
-        <h3 class="LC20lb MBeuO DKV0Md">Toto je duplicitní titulek</h3>
-    </a>
+        # Ověříme, že náš "dvojník" byl zavolán přesně jednou
+        mock_post.assert_called_once()
 
-    <!-- Nevalidní: relativní URL -->
-    <a class="zReHs" href="/relativni-odkaz">
-        <h3 class="LC20lb MBeuO DKV0Md">Relativní odkaz</h3>
-    </a>
+    def test_search_missing_query(self):
+        """Testuje, co se stane, když chybí parametr 'q'."""
+        response = self.client.get('/api/search')
+        
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.data)
+        self.assertIn('error', data)
+        self.assertEqual(data['error'], "Chybí vyhledávací dotaz 'q'.")
 
-    <!-- Nevalidní: chybí href -->
-    <a class="zReHs">
-        <h3 class="LC20lb MBeuO DKV0Md">Odkaz bez href</h3>
-    </a>
-</body></html>
-"""
-
-class TestParser(unittest.TestCase):
-
-    def test_parse_results_with_specific_classes(self):
-        """Testuje parsování s vysoce specifickými třídami."""
-        results = parse_google_results(FAKE_GOOGLE_HTML)
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0]['title'], "Toto je první titulek")
-        self.assertEqual(results[0]['url'], "https://www.example.com/prvni-vysledek")
-        self.assertEqual(results[1]['title'], "Toto je druhý titulek")
-        self.assertEqual(results[1]['url'], "http://www.example.org/druhy-vysledek")
-
-    def test_parse_empty_html(self):
-        """Testuje chování funkce při prázdném HTML vstupu."""
-        results = parse_google_results("<html><body></body></html>")
-        self.assertEqual(len(results), 0)
-
-    def test_duplicate_and_invalid_urls_are_ignored(self):
-        """
-        Testuje, že duplicitní, relativní a chybějící URL jsou správně ignorovány.
-        FAKE_GOOGLE_HTML obsahuje tyto případy.
-        """
-        results = parse_google_results(FAKE_GOOGLE_HTML)
-        self.assertEqual(len(results), 2, "Měly by být nalezeny pouze 2 unikátní a validní výsledky.")
-
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    @patch('app.requests.post')
+    def test_search_api_error(self, mock_post):
+        """Testuje, co se stane, když externí API vrátí chybu."""
+        # Nastavíme "dvojníka", aby při zavolání vyhodil výjimku
+        mock_post.side_effect = requests.exceptions.RequestException("API je nedostupné")
+        
+        response = self.client.get('/api/search?q=nejaky dotaz')
+        
+        self.assertEqual(response.status_code, 500)
+        data = json.loads(response.data)
+        self.assertIn('error', data)
+        self.assertIn("Došlo k chybě při komunikaci s API", data['error'])
